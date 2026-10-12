@@ -1,0 +1,259 @@
+<#
+.SYNOPSIS
+    Morse code decoder - the reverse of morse.ps1.
+
+.DESCRIPTION
+    Reads Morse code and converts it back to uppercase text.
+
+    Accepts the classic symbols ( . - ) as well as the visual symbols that
+    morse.ps1 prints (dot / dash glyphs), and both common ways of writing
+    Morse:
+
+      explicit layout   ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."
+                        one space between letters, "/" between words
+
+      gap layout        exactly what morse.ps1 prints: 1 space between the
+                        symbols inside one letter, 3 spaces between letters,
+                        10 spaces between words
+
+    The layout is auto-detected; -Mode can force one.  Unknown sequences
+    decode as "?" (use -Detail to see what was not understood).
+
+.PARAMETER Morse
+    Morse text to decode.  If omitted it is read from stdin (when piped)
+    or asked for interactively.
+
+.PARAMETER Mode
+    auto (default), explicit or gap.
+
+.PARAMETER FromFile
+    Read the Morse text from a file instead (UTF-8).
+
+.PARAMETER Detail
+    Print how the input was interpreted, and the alternative reading when
+    the two layouts disagree.
+
+.EXAMPLE
+    .\morse_decode.ps1 -Morse ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."
+    HELLO WORLD
+
+.EXAMPLE
+    $raw = (& .\morse.ps1 "SOS" 6>&1 | ForEach-Object ToString) -join ""
+    .\morse_decode.ps1 -Morse $raw
+#>
+param(
+    [string]$Morse = "",
+
+    [ValidateSet('auto', 'explicit', 'gap')]
+    [string]$Mode = 'auto',
+
+    [string]$FromFile = "",
+
+    [switch]$Detail
+)
+
+Set-StrictMode -Version Latest
+
+# ---- same character table as morse.ps1: character -> morse ----------------
+$CodeTable = [ordered]@{
+    'A' = '.-';     'B' = '-...';   'C' = '-.-.';   'D' = '-..'
+    'E' = '.';      'F' = '..-.';   'G' = '--.';    'H' = '....'
+    'I' = '..';     'J' = '.---';   'K' = '-.-';    'L' = '.-..'
+    'M' = '--';     'N' = '-.';     'O' = '---';    'P' = '.--.'
+    'Q' = '--.-';   'R' = '.-.';    'S' = '...';    'T' = '-'
+    'U' = '..-';    'V' = '...-';   'W' = '.--';    'X' = '-..-'
+    'Y' = '-.--';   'Z' = '--..'
+    '1' = '.----';  '2' = '..---';  '3' = '...--';  '4' = '....-'
+    '5' = '.....';  '6' = '-....';  '7' = '--...';  '8' = '---..'
+    '9' = '----.';  '0' = '-----'
+    '?' = '..--..'; '!' = '-.-.--'; '.' = '.-.-.-'; ',' = '--..--'
+    "'" = '.----.'; ':' = '---...'; '+' = '.-.-.';  '-' = '-....-'
+    '*' = '-..-'
+}
+$CodeTable[[string][char]0x00F7] = '-..-.'    # division sign
+
+# reverse table (morse -> character); on collisions prefer letters/digits
+# (-..- is both X and * in morse.ps1, so it decodes to X)
+$Reverse = @{}
+foreach ($entry in $CodeTable.GetEnumerator()) {
+    $sequence  = [string]$entry.Value
+    $character = [string]$entry.Key
+    if (-not $Reverse.ContainsKey($sequence)) {
+        $Reverse[$sequence] = $character
+    }
+    elseif ($character -cmatch '[A-Z0-9]' -and $Reverse[$sequence] -cnotmatch '[A-Z0-9]') {
+        $Reverse[$sequence] = $character
+    }
+}
+
+# symbol sets the decoder accepts
+$script:DotChars    = @(0x2E, 0xB7, 0x2022, 0x2024, 0x2219, 0x25CF, 0x25E6, 0xFF0E) | ForEach-Object { [char]$_ }
+$script:DashChars   = @(0x2D, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0x2500, 0xFF0D, 0x5F) | ForEach-Object { [char]$_ }
+$script:VisualChars = @(0x25CF, 0x2022, 0x25E6, 0x2015, 0x2500) | ForEach-Object { [char]$_ }
+
+function ConvertTo-MorseSymbols {
+    param([string]$Text)
+    $Text = $Text.Replace("`r", '')
+    $Text = $Text.Replace([string][char]0xFEFF, '')   # UTF-8 BOM (e.g. from PS 5.1 pipes)
+    foreach ($symbol in $script:DotChars)  { $Text = $Text.Replace([string]$symbol, '.') }
+    foreach ($symbol in $script:DashChars) { $Text = $Text.Replace([string]$symbol, '-') }
+    return $Text
+}
+
+function Test-MorseSymbol {
+    param([char]$Char)
+    return ($script:DotChars -contains $Char) -or ($script:DashChars -contains $Char)
+}
+
+function Close-LetterGroup {
+    param(
+        [System.Text.StringBuilder]$Buffer,
+        [System.Text.StringBuilder]$Out,
+        [System.Collections.Generic.List[string]]$Unknown
+    )
+    if ($Buffer.Length -eq 0) { return }
+    $sequence = $Buffer.ToString()
+    [void]$Buffer.Clear()
+    if ($Reverse.ContainsKey($sequence)) {
+        [void]$Out.Append($Reverse[$sequence])
+    }
+    else {
+        $Unknown.Add("'$sequence'")
+        [void]$Out.Append('?')
+    }
+}
+
+# Decode a normalized string, using gap widths to tell the levels apart:
+#   IntraMax  - longest space run still inside one letter
+#   LetterMax - longest space run still between two letters; longer = word
+function Invoke-MorseParse {
+    param([string]$Text, [int]$IntraMax, [int]$LetterMax)
+
+    $out     = New-Object System.Text.StringBuilder
+    $buffer  = New-Object System.Text.StringBuilder
+    $unknown = New-Object 'System.Collections.Generic.List[string]'
+
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $c = $Text[$i]
+        if ([char]::IsWhiteSpace($c)) {
+            $j = $i
+            while ($j -lt $Text.Length -and [char]::IsWhiteSpace($Text[$j])) { $j++ }
+            $run = $j - $i
+            if ($buffer.Length -gt 0 -and $run -gt $IntraMax) {
+                Close-LetterGroup $buffer $out $unknown
+                if ($run -gt $LetterMax) { [void]$out.Append(' ') }
+            }
+            $i = $j
+        }
+        elseif ($c -eq '/') {
+            Close-LetterGroup $buffer $out $unknown
+            [void]$out.Append(' ')
+            $i++
+        }
+        elseif ($c -eq '.' -or $c -eq '-') {
+            [void]$buffer.Append($c)
+            $i++
+        }
+        else {
+            # anything that is not a symbol / separator: report and skip
+            $unknown.Add("junk '$c'")
+            [void]$out.Append('?')
+            $i++
+        }
+    }
+    Close-LetterGroup $buffer $out $unknown
+
+    $text = ($out.ToString() -replace '\s+', ' ').Trim()
+    return @{ Text = $text; Unknown = $unknown }
+}
+
+# Guess which layout the user pasted.
+function Get-PreferredLayout {
+    param([string]$Raw)
+    if ($Raw.Contains('/')) { return 'explicit' }
+    foreach ($visual in $script:VisualChars) {
+        if ($Raw.IndexOf($visual) -ge 0) { return 'gap' }
+    }
+    foreach ($chunk in ($Raw -split '\s+')) {
+        if ($chunk -eq '') { continue }
+        $symbols = 0
+        foreach ($character in $chunk.ToCharArray()) {
+            if (Test-MorseSymbol $character) { $symbols++ }
+        }
+        if ($symbols -ge 2) { return 'explicit' }
+    }
+    foreach ($match in [regex]::Matches($Raw, '\s+')) {
+        if ($match.Length -ge 2) { return 'gap' }
+    }
+    return 'explicit'
+}
+
+# Read piped stdin as text: try UTF-8 first, fall back to Windows-1252.
+function Read-AllStdin {
+    $stream = New-Object System.IO.MemoryStream
+    [Console]::OpenStandardInput().CopyTo($stream)
+    $bytes = $stream.ToArray()
+    try {
+        return (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
+    }
+    catch {
+        return [System.Text.Encoding]::GetEncoding(1252).GetString($bytes)
+    }
+}
+
+try {
+    $raw = $Morse
+
+    if ($FromFile) {
+        $raw = Get-Content -LiteralPath $FromFile -Raw -Encoding UTF8
+    }
+    if (-not $raw) {
+        if ([Console]::IsInputRedirected) { $raw = Read-AllStdin }
+        else { $raw = Read-Host 'Enter morse code to read' }
+    }
+    if (-not $raw -or $raw.Trim() -eq '') {
+        Write-Warning 'nothing to decode'
+        return
+    }
+
+    $normalized = ConvertTo-MorseSymbols $raw
+    $explicit   = Invoke-MorseParse $normalized 0 2   # one space between letters
+    $gap        = Invoke-MorseParse $normalized 1 4   # morse.ps1 timing gaps
+    $preferred  = Get-PreferredLayout $raw
+
+    if ($Mode -ne 'auto') {
+        $chosen = $Mode
+    }
+    elseif ($explicit.Unknown.Count -ne $gap.Unknown.Count) {
+        if ($explicit.Unknown.Count -lt $gap.Unknown.Count) { $chosen = 'explicit' }
+        else { $chosen = 'gap' }
+    }
+    else {
+        $chosen = $preferred
+    }
+
+    if ($chosen -eq 'explicit') {
+        $result = $explicit; $other = $gap; $otherName = 'gap'
+    }
+    else {
+        $result = $gap; $other = $explicit; $otherName = 'explicit'
+    }
+
+    Write-Output $result.Text
+
+    if ($Detail) {
+        Write-Host ("mode    : {0}  (auto preference: {1})" -f $chosen, $preferred)
+        Write-Host ("unknown : {0}   (explicit layout: {1}, gap layout: {2})" -f $result.Unknown.Count, $explicit.Unknown.Count, $gap.Unknown.Count)
+        if ($result.Unknown.Count -gt 0) {
+            Write-Host ("          " + ($result.Unknown -join '  '))
+        }
+        if ($other.Text -and $other.Text -ne $result.Text) {
+            Write-Host ("also reads as ({0} layout): {1}" -f $otherName, $other.Text)
+        }
+    }
+}
+catch {
+    Write-Host ("ERROR: {0} (script line {1})" -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber)
+    exit 1
+}
