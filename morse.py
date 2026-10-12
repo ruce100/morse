@@ -342,7 +342,14 @@ def self_test():
     check("prosign word boundary",
           decode(encode_plain("SOSSOS", prosigns=True))[0], "SOSSOS")
 
-    # 6. error handling
+    # 6. CLI argument protection
+    check("argv encode+style", _protect_dashed_morse(["--encode", "--style", "plain", "SOS 42"]),
+          ["--encode=SOS 42", "--style", "plain"])
+    check("argv encode+prosigns", _protect_dashed_morse(["--encode", "--prosigns", "SOS"]),
+          ["--encode=SOS", "--prosigns"])
+    check("argv dash-leading", _protect_dashed_morse(["-.-"]), ["--", "-.-"])
+
+    # 7. error handling
     text, unknown = decode("......")
     check("unknown -> ?", text, "?")
     check("unknown counted", len(unknown) >= 1, True)
@@ -372,6 +379,7 @@ def read_input(args):
 
 
 _MORSE_ARG_CHARS = set(".-/ \t")
+_VALUE_OPTIONS = {"-m", "--mode", "-f", "--file", "--style", "-e", "--encode"}
 
 
 def _looks_like_morse(tok: str) -> bool:
@@ -380,20 +388,29 @@ def _looks_like_morse(tok: str) -> bool:
 
 
 def _protect_dashed_morse(argv: list[str]) -> list[str]:
-    """Let morse strings that start with '-' (e.g. '-.-.-') survive argparse.
+    """Make morse arguments safe for argparse.
 
-    argparse would treat '-.-.-' as an option.  First merge '-e'/--encode
-    values that look like morse into the '--encode=...' form, then insert a
-    single '--' before the first positional that starts with a dash.
+    - Rebind the value of '-e'/--encode even when options sit between it and
+      the value ('--encode --style plain TEXT' -> '--encode=TEXT --style plain',
+      so any option order works).
+    - Insert a single '--' before the first positional that starts with '-'
+      so dash-leading morse strings (e.g. '-.-.-') parse.
     """
     merged: list[str] = []
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok in ("-e", "--encode") and i + 1 < len(argv) and _looks_like_morse(argv[i + 1]):
-            merged.append("--encode=" + argv[i + 1])
-            i += 2
-            continue
+        if tok in ("-e", "--encode"):
+            j = i + 1
+            while j < len(argv) and argv[j].startswith("-") and argv[j] != "--":
+                if _looks_like_morse(argv[j]):
+                    break                        # dashed morse = the value
+                j += 2 if argv[j] in _VALUE_OPTIONS else 1
+            if j < len(argv) and argv[j] != "--":
+                merged.append("--encode=" + argv[j])
+                merged.extend(argv[i + 1:j])
+                i = j + 1
+                continue
         merged.append(tok)
         i += 1
     for j, tok in enumerate(merged):
@@ -416,7 +433,16 @@ def main(argv=None):
         pass
 
     parser = argparse.ArgumentParser(
-        description="Decode (or encode) Morse code. Reverse of morse.ps1.")
+        description="Decode (or encode) Morse code. Reverse of morse.ps1.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  python morse.py \".... . .-.. .-.. --- / .-- --- .-. .-.. -..\"\n"
+            "  python morse.py \"...---...\"                       # SOS (prosign)\n"
+            "  python morse.py --encode \"SOS 42\"                 # visual Morse\n"
+            "  python morse.py --encode --style plain \"SOS 42\"   # ... --- ... / ....- ..---\n"
+            "  python morse.py --encode --prosigns \"SOS\"         # gapless single signal\n"
+            "  options and their values can appear in any order"))
     parser.add_argument("morse", nargs="*",
                         help="morse code string(s), joined with spaces")
     parser.add_argument("-m", "--mode", choices=("auto", "explicit", "gap"),

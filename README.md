@@ -31,11 +31,11 @@ python morse.py ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."    # HELLO WORLD
 python morse.py -m gap -f raw.txt
 type raw.txt | python morse.py
 python morse.py --encode "SOS 42"        # -> visual Morse, same as morse.ps1 prints
-python morse.py --style plain --encode "SOS 42"   # -> "... --- ... / ....- ..---"
+python morse.py --encode --style plain "SOS 42"   # -> "... --- ... / ....- ..---"
 python morse.py --encode -               # encode text piped via stdin
 python morse.py "...---..."              # SOS (prosign group, gapless)
 python morse.py --prosigns ".-.-."       # AR  (default reads it as +)
-python morse.py --prosigns --encode "SOS"   # formal single-signal form, no letter gaps
+python morse.py --encode --prosigns "SOS"   # formal single-signal form, no letter gaps
 python morse.py --self-test
 ```
 
