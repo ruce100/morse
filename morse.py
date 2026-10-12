@@ -5,7 +5,9 @@
 The reverse of morse.ps1 (text -> timed dots/dashes): reads Morse code back
 into uppercase text.  Accepts both the classic symbols ( . - ) and the
 visual symbols morse.ps1 prints (dot / dash glyphs), and auto-detects the
-two common ways of writing Morse:
+two common ways of writing Morse.  The character set is morse.ps1's table
+plus the ITU-R M.1677-1 punctuation marks, plus common practice for
+non-ITU symbols (! & ; _ $):
 
   explicit layout   ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."
                     one space between letters, "/" between words
@@ -26,13 +28,15 @@ import re
 import sys
 
 # anything in DOTS reads as "." and anything in DASHES reads as "-"
+# (an actual underscore is a real character - ..--.- - not a dash variant)
 DOTS = set(".\u00b7\u2022\u2024\u2219\u25cf\u25e6\uff0e")
-DASHES = set("-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uff0d_")
+DASHES = set("-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uff0d")
 
 # the symbols morse.ps1 itself prints (used as a style hint)
 VISUAL = set("\u25cf\u2022\u25e6\u2015\u2500")
 
-# ---- same character table as morse.ps1: character -> morse ----------------
+# ---- character table: morse.ps1's set + the ITU-R M.1677-1 punctuation ----
+# ---- marks + common practice for non-ITU symbols (! & ; _ $) ---------------
 CODE = {
     "A": ".-", "B": "-...", "C": "-.-.", "D": "-..", "E": ".", "F": "..-.",
     "G": "--.", "H": "....", "I": "..", "J": ".---", "K": "-.-", "L": ".-..",
@@ -42,17 +46,25 @@ CODE = {
     "1": ".----", "2": "..---", "3": "...--", "4": "....-", "5": ".....",
     "6": "-....", "7": "--...", "8": "---..", "9": "----.", "0": "-----",
     "?": "..--..", "!": "-.-.--", ".": ".-.-.-", ",": "--..--", "'": ".----.",
-    ":": "---...", "+": ".-.-.", "-": "-....-", "*": "-..-", "\u00f7": "-..-.",
+    ":": "---...", "+": ".-.-.", "-": "-....-", "/": "-..-.", "(": "-.--.",
+    ")": "-.--.-", "&": ".-...", ";": "-.-.-.", "=": "-...-", "_": "..--.-",
+    '"': ".-..-.", "$": "...-..-", "@": ".--.-.",
+    "*": "-..-", "\u00f7": "-..-.",
 }
 
-# reverse table (morse -> character); on collisions prefer letters/digits
-# (-..- is both X and * in morse.ps1, so it decodes to X)
+# reverse table (morse -> character); on collisions the more standard
+# character wins: letters/digits > ASCII punctuation > other symbols
+# (-..- is X/* -> X;  -..-. is / and the division sign -> /)
+def _char_rank(c: str) -> int:
+    if c.isalnum() and c.isascii():
+        return 0
+    return 1 if c.isascii() else 2
+
+
 MORSE2CHAR = {}
 for _ch, _m in CODE.items():
     _cur = MORSE2CHAR.get(_m)
-    if _cur is None:
-        MORSE2CHAR[_m] = _ch
-    elif _ch.isalnum() and not _cur.isalnum():
+    if _cur is None or _char_rank(_ch) < _char_rank(_cur):
         MORSE2CHAR[_m] = _ch
 
 
@@ -197,13 +209,14 @@ def self_test():
         checks.append((name, got, expected))
 
     # 1. every symbol round-trips through both layouts
+    shared = {"*": "X", "\u00f7": "/"}      # -..- is X/*; -..-. is /, division sign
     for ch in CODE:
-        expected = "X" if ch == "*" else ch     # -..- is shared with X; X wins
+        expected = shared.get(ch, ch)
         check(f"visual {ch}", decode(encode_visual(ch))[0], expected)
         check(f"plain  {ch}", decode(encode_plain(ch))[0], expected)
 
     # 2. every symbol at once, no spaces
-    full = "".join(c for c in CODE if c != "*")
+    full = "".join(c for c in CODE if c not in shared)
     check("visual all", decode(encode_visual(full))[0], full)
     check("plain  all", decode(encode_plain(full))[0], full)
 
@@ -222,6 +235,12 @@ def self_test():
     check("gap dotty sentence",
           decode(encode_visual("HELLO DOTTY. HOW ARE YOU TODAY?"))[0],
           "HELLO DOTTY. HOW ARE YOU TODAY?")
+    challenge = ". , ? ' ! / ( ) & : ; = - _ \" $ @"
+    check("challenge visual", decode(encode_visual(challenge))[0], challenge)
+    check("challenge plain", decode(encode_plain(challenge))[0], challenge)
+    check("challenge compact",
+          decode(encode_visual(challenge.replace(" ", "")))[0],
+          challenge.replace(" ", ""))
 
     # 5. error handling
     text, unknown = decode("........")
@@ -273,7 +292,7 @@ def main(argv=None):
                         default="auto", help="layout of the input (default: auto-detect)")
     parser.add_argument("-f", "--file", help="read morse code from a text file")
     parser.add_argument("-e", "--encode", metavar="TEXT",
-                        help="encode TEXT to morse instead of decoding")
+                        help="encode TEXT to morse instead of decoding (- reads stdin)")
     parser.add_argument("--style", choices=("visual", "plain"), default="visual",
                         help="output style for --encode (default: visual)")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -288,8 +307,11 @@ def main(argv=None):
         return self_test()
 
     if args.encode is not None:
-        print(encode_visual(args.encode) if args.style == "visual"
-              else encode_plain(args.encode))
+        text = args.encode
+        if text == "-":                     # read from stdin (PowerShell 5.1 pipes)
+            text = sys.stdin.read().rstrip("\r\n")
+        print(encode_visual(text) if args.style == "visual"
+              else encode_plain(text))
         return 0
 
     raw = read_input(args)

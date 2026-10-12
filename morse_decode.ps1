@@ -54,7 +54,8 @@ param(
 
 Set-StrictMode -Version Latest
 
-# ---- same character table as morse.ps1: character -> morse ----------------
+# ---- character table: morse.ps1's set + the ITU-R M.1677-1 punctuation ----
+# ---- marks + common practice for non-ITU symbols (! & ; _ $) ---------------
 $CodeTable = [ordered]@{
     'A' = '.-';     'B' = '-...';   'C' = '-.-.';   'D' = '-..'
     'E' = '.';      'F' = '..-.';   'G' = '--.';    'H' = '....'
@@ -68,27 +69,38 @@ $CodeTable = [ordered]@{
     '9' = '----.';  '0' = '-----'
     '?' = '..--..'; '!' = '-.-.--'; '.' = '.-.-.-'; ',' = '--..--'
     "'" = '.----.'; ':' = '---...'; '+' = '.-.-.';  '-' = '-....-'
-    '*' = '-..-'
+    '/' = '-..-.';  '(' = '-.--.';  ')' = '-.--.-'; '&' = '.-...'
+    ';' = '-.-.-.'; '=' = '-...-';  '_' = '..--.-'; '"' = '.-..-.'
+    '$' = '...-..-'; '@' = '.--.-.'; '*' = '-..-'
 }
 $CodeTable[[string][char]0x00F7] = '-..-.'    # division sign
 
-# reverse table (morse -> character); on collisions prefer letters/digits
-# (-..- is both X and * in morse.ps1, so it decodes to X)
+# reverse table (morse -> character); on collisions the more standard
+# character wins: letters/digits > ASCII punctuation > other symbols
+# (-..- is X/* -> X;  -..-. is / and the division sign -> /)
+function Get-CharacterRank {
+    param([string]$Character)
+    if ($Character -cmatch '^[A-Za-z0-9]$') { return 0 }
+    if ([int][char]$Character -le 127) { return 1 }
+    return 2
+}
+
 $Reverse = @{}
 foreach ($entry in $CodeTable.GetEnumerator()) {
     $sequence  = [string]$entry.Value
     $character = [string]$entry.Key
+    $rank      = Get-CharacterRank $character
     if (-not $Reverse.ContainsKey($sequence)) {
         $Reverse[$sequence] = $character
     }
-    elseif ($character -cmatch '[A-Z0-9]' -and $Reverse[$sequence] -cnotmatch '[A-Z0-9]') {
+    elseif ($rank -lt (Get-CharacterRank $Reverse[$sequence])) {
         $Reverse[$sequence] = $character
     }
 }
 
 # symbol sets the decoder accepts
 $script:DotChars    = @(0x2E, 0xB7, 0x2022, 0x2024, 0x2219, 0x25CF, 0x25E6, 0xFF0E) | ForEach-Object { [char]$_ }
-$script:DashChars   = @(0x2D, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0x2500, 0xFF0D, 0x5F) | ForEach-Object { [char]$_ }
+$script:DashChars   = @(0x2D, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0x2500, 0xFF0D) | ForEach-Object { [char]$_ }   # no 0x5F: "_" is a real character (..--.-), not a dash
 $script:VisualChars = @(0x25CF, 0x2022, 0x25E6, 0x2015, 0x2500) | ForEach-Object { [char]$_ }
 
 function ConvertTo-MorseSymbols {

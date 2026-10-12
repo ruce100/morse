@@ -30,9 +30,16 @@ python morse.py ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."    # HELLO WORLD
 python morse.py -m gap -f raw.txt
 type raw.txt | python morse.py
 python morse.py --encode "SOS 42"        # -> visual Morse, same as morse.ps1 prints
-python morse.py --encode --style plain "SOS 42"   # -> "... --- ... / ....- ..---"
+python morse.py --style plain --encode "SOS 42"   # -> "... --- ... / ....- ..---"
+python morse.py --encode -               # encode text piped via stdin
 python morse.py --self-test
 ```
+
+> Quoting tip: Windows PowerShell 5.1 truncates a native argument at an embedded
+> `"`, so use the stdin form there —
+> `'. , ? '' ! / ( ) & : ; = - _ " $ @' | python morse.py --encode -`
+> (PowerShell 7 accepts the quoted form directly; cmd.exe wants the quote
+> doubled: `--encode ". , ? ' ! ( ) & : ; = - _ "" $ @"`).
 
 > Windows PowerShell 5.1 tip: piping between the two `python` commands mangles
 > the ●/― glyphs unless UTF-8 is enabled first —
@@ -41,8 +48,12 @@ python morse.py --self-test
 
 ## What it understands
 
-* classic symbols `.` `-` (and variants `· – — − _ …`) as well as the visual
+* classic symbols `.` `-` (and variants `· – — − …`) as well as the visual
   symbols `●` `―` that `morse.ps1` prints
+* the full punctuation set: the ITU-R M.1677-1 marks
+  (`.` `,` `?` `'` `/` `(` `)` `"` `=` `-` `:` `@` …) and the common
+  extensions (`!` `&` `;` `_` `$`), plus the original script's `*` and `÷`.
+  An actual underscore is a character (`..--.-`) — no longer a dash variant.
 * **explicit layout** — one space between letters, `/` (or 3+ spaces) between words
 * **gap layout** — raw `morse.ps1` output: 1 space between the symbols inside a
   letter, 3 between letters, 10 between words
@@ -51,7 +62,8 @@ python morse.py --self-test
 
 ## Known limits
 
-* `-..-` is both `X` and `*` in `morse.ps1`; decoding always returns `X`.
+* `-..-` is both `X` and `*` in `morse.ps1` and `-..-.` is both `/` and `÷`;
+  decoding returns the standard character (`X`, `/`).
 * characters `morse.ps1` has no code for (e.g. `#`) were played as a word gap,
   so decoding cannot bring them back.
 * unknown Morse sequences decode as `?`; Python `--strict` exits with code 2
