@@ -24,12 +24,14 @@ Examples:
     python morse.py -f raw_output.txt
     type raw_output.txt | python morse.py
     python morse.py --encode "HELLO WORLD"      # text -> visual morse
+    python morse.py --play "SOS"                # print it and beep it (CW sidetone)
     python morse.py --self-test
 """
 import argparse
 import io
 import re
 import sys
+import time
 
 # anything in DOTS reads as "." and anything in DASHES reads as "-"
 # (an actual underscore is a real character - ..--.- - not a dash variant)
@@ -280,6 +282,90 @@ def encode_plain(text, prosigns=False):
     return " / ".join(w for w in words if w)
 
 
+def _tone_wav(freq, ms, rate=44100):
+    """Mono 16-bit WAV bytes of a sine tone with short fades (click-free)."""
+    from array import array
+    import math
+    import wave
+
+    frames = max(1, int(rate * ms / 1000.0))
+    fade = min(int(rate * 0.002), frames // 2)
+    step = 2.0 * math.pi * freq / rate
+    samples = array("h")
+    for i in range(frames):
+        amp = 0.45
+        if fade and i < fade:
+            amp *= i / fade
+        elif fade and i >= frames - fade:
+            amp *= (frames - i) / fade
+        samples.append(int(32767 * amp * math.sin(step * i)))
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(samples.tobytes())
+    return buffer.getvalue()
+
+
+def play_morse(text, prosigns=False, style="visual", speed=100, freq=700,
+               engine="sound"):
+    """Print the Morse while playing it as audible CW beeps (ti / taa).
+
+    speed = one unit in milliseconds (a dash is three), freq = tone in Hz.
+    engine "sound" (default) plays generated tones through the sound card;
+    engine "beep" uses the raw winsound.Beep API (silent on some machines).
+    The printed line matches the --encode output; gaps are 1/3/10 units
+    exactly like morse.ps1's visual gaps.
+    """
+    try:
+        import winsound
+    except ImportError:
+        print("morse: --play needs Windows (winsound)", file=sys.stderr)
+        return 1
+    dot_ms = max(1, int(speed))
+    unit = dot_ms / 1000.0
+    freq = min(max(int(freq), 37), 32767)
+    dot_char, dash_char = (".", "-") if style == "plain" else ("\u25cf", "\u2015")
+    dot_clip = _tone_wav(freq, dot_ms) if engine == "sound" else b""
+    dash_clip = _tone_wav(freq, 3 * dot_ms) if engine == "sound" else b""
+    sound_ok = True
+
+    def tone(milliseconds):
+        nonlocal sound_ok
+        if not sound_ok:
+            return
+        try:
+            if engine == "beep":
+                winsound.Beep(freq, milliseconds)
+            else:
+                winsound.PlaySound(
+                    dot_clip if milliseconds == dot_ms else dash_clip,
+                    winsound.SND_MEMORY)
+        except (RuntimeError, MemoryError):
+            sound_ok = False
+            print("\nmorse: could not play sound - continuing silently",
+                  file=sys.stderr)
+
+    for kind, value in _encode_units(text, prosigns):
+        morse = PROSIGN_NAMES[value] if kind == "prosign" else CODE.get(value)
+        if morse is None:                   # space / unknown -> word gap
+            print(" " * 7, end="", flush=True)
+            time.sleep(7 * unit)
+            continue
+        for index, symbol in enumerate(morse):
+            dot = symbol == "."
+            print(dot_char if dot else dash_char, end="", flush=True)
+            tone(dot_ms if dot else 3 * dot_ms)
+            if index < len(morse) - 1:
+                print(" ", end="", flush=True)
+                time.sleep(unit)
+        print("   ", end="", flush=True)
+        time.sleep(3 * unit)
+    print()
+    return 0
+
+
 def self_test():
     checks = []
 
@@ -348,6 +434,14 @@ def self_test():
     check("argv encode+prosigns", _protect_dashed_morse(["--encode", "--prosigns", "SOS"]),
           ["--encode=SOS", "--prosigns"])
     check("argv dash-leading", _protect_dashed_morse(["-.-"]), ["--", "-.-"])
+    check("argv play+style", _protect_dashed_morse(["--play", "--style", "plain", "SOS"]),
+          ["--play=SOS", "--style", "plain"])
+    check("argv play+speed", _protect_dashed_morse(["--play", "--speed", "1", "SOS"]),
+          ["--play=SOS", "--speed", "1"])
+    check("argv play stdin", _protect_dashed_morse(["--play", "--speed", "1", "-"]),
+          ["--play=-", "--speed", "1"])
+    check("argv play+engine", _protect_dashed_morse(["--play", "--engine", "beep", "SOS"]),
+          ["--play=SOS", "--engine", "beep"])
 
     # 7. error handling
     text, unknown = decode("......")
@@ -379,7 +473,9 @@ def read_input(args):
 
 
 _MORSE_ARG_CHARS = set(".-/ \t")
-_VALUE_OPTIONS = {"-m", "--mode", "-f", "--file", "--style", "-e", "--encode"}
+# options that take a value - keep in sync when adding new ones
+_VALUE_OPTIONS = {"-m", "--mode", "-f", "--file", "--style", "-e", "--encode",
+                  "--play", "--speed", "--freq", "--engine"}
 
 
 def _looks_like_morse(tok: str) -> bool:
@@ -400,14 +496,15 @@ def _protect_dashed_morse(argv: list[str]) -> list[str]:
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok in ("-e", "--encode"):
+        if tok in ("-e", "--encode", "--play"):
             j = i + 1
-            while j < len(argv) and argv[j].startswith("-") and argv[j] != "--":
+            while j < len(argv) and argv[j].startswith("-") and argv[j] not in ("-", "--"):
                 if _looks_like_morse(argv[j]):
                     break                        # dashed morse = the value
                 j += 2 if argv[j] in _VALUE_OPTIONS else 1
             if j < len(argv) and argv[j] != "--":
-                merged.append("--encode=" + argv[j])
+                prefix = "--play=" if tok == "--play" else "--encode="
+                merged.append(prefix + argv[j])
                 merged.extend(argv[i + 1:j])
                 i = j + 1
                 continue
@@ -442,6 +539,7 @@ def main(argv=None):
             "  python morse.py --encode \"SOS 42\"                 # visual Morse\n"
             "  python morse.py --encode --style plain \"SOS 42\"   # ... --- ... / ....- ..---\n"
             "  python morse.py --encode --prosigns \"SOS\"         # gapless single signal\n"
+            "  python morse.py --play \"SOS\"                     # ti ti ti taa taa taa ti ti ti\n"
             "  options and their values can appear in any order"))
     parser.add_argument("morse", nargs="*",
                         help="morse code string(s), joined with spaces")
@@ -456,6 +554,16 @@ def main(argv=None):
                         help="recognize prosign groups (SOS, SK, KA, VE, HH, and with the "
                              "flag AR/BT/AS/KN over their punctuation pattern); with --encode, "
                              "emit matched names as one gapless group")
+    parser.add_argument("--play", metavar="TEXT",
+                        help="like --encode but also plays the Morse as audible CW beeps "
+                             "(ti/taa) while printing (- reads stdin)")
+    parser.add_argument("--speed", type=int, default=100, metavar="MS",
+                        help="unit length for --play in milliseconds (default 100, as in morse.ps1)")
+    parser.add_argument("--freq", type=int, default=700, metavar="HZ",
+                        help="tone frequency for --play (default 700)")
+    parser.add_argument("--engine", choices=("sound", "beep"), default="sound",
+                        help="--play tone engine: 'sound' = generated tone through the "
+                             "sound card (default), 'beep' = the raw winsound.Beep API")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="explain how the input was interpreted")
     parser.add_argument("--strict", action="store_true",
@@ -467,6 +575,13 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+
+    if args.play is not None:
+        text = args.play
+        if text == "-":                     # read from stdin
+            text = sys.stdin.read().rstrip("\r\n")
+        return play_morse(text, args.prosigns, args.style, args.speed, args.freq,
+                          args.engine)
 
     if args.encode is not None:
         text = args.encode

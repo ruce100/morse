@@ -36,6 +36,9 @@ python morse.py --encode -               # encode text piped via stdin
 python morse.py "...---..."              # SOS (prosign group, gapless)
 python morse.py --prosigns ".-.-."       # AR  (default reads it as +)
 python morse.py --encode --prosigns "SOS"   # formal single-signal form, no letter gaps
+python morse.py --play "SOS"                # print + beep it: ti ti ti taa taa taa ti ti ti
+                                            #   (--speed MS = unit, --freq HZ = tone,
+                                            #    --engine beep = raw Beep API, silent on some PCs)
 python morse.py --self-test
 ```
 
