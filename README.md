@@ -21,7 +21,8 @@ $raw = (& .\morse.ps1 "HELLO WORLD" 6>&1 | ForEach-Object ToString) -join ""
 .\morse_decode.ps1
 ```
 
-Options: `-Mode auto|explicit|gap` to force an interpretation, `-Detail` for a report.
+Options: `-Mode auto|explicit|gap` to force an interpretation, `-Detail` for a report,
+`-Prosigns` to prefer the prosign reading for groups that share a pattern with punctuation.
 
 ## Decode with Python
 
@@ -32,6 +33,9 @@ type raw.txt | python morse.py
 python morse.py --encode "SOS 42"        # -> visual Morse, same as morse.ps1 prints
 python morse.py --style plain --encode "SOS 42"   # -> "... --- ... / ....- ..---"
 python morse.py --encode -               # encode text piped via stdin
+python morse.py "...---..."              # SOS (prosign group, gapless)
+python morse.py --prosigns ".-.-."       # AR  (default reads it as +)
+python morse.py --prosigns --encode "SOS"   # formal single-signal form, no letter gaps
 python morse.py --self-test
 ```
 
@@ -54,6 +58,12 @@ python morse.py --self-test
   (`.` `,` `?` `'` `/` `(` `)` `"` `=` `-` `:` `@` …) and the common
   extensions (`!` `&` `;` `_` `$`), plus the original script's `*` and `÷`.
   An actual underscore is a character (`..--.-`) — no longer a dash variant.
+* prosigns — letter groups keyed as one continuous character, no letter gaps:
+  `...---...` → SOS (the distress signal's formal single-signal form,
+  47 CFR §80.314), `...-.-` → SK, `-.-.-` → KA, `...-.` → VE, `........` → HH
+  (error).  With `--prosigns` / `-Prosigns`, `.-.-.` `-...-` `.-...` `-.--.`
+  read as AR, BT, AS, KN instead of `+` `=` `&` `(`; `--encode --prosigns "SOS"`
+  emits the gapless single-signal form.
 * **explicit layout** — one space between letters, `/` (or 3+ spaces) between words
 * **gap layout** — raw `morse.ps1` output: 1 space between the symbols inside a
   letter, 3 between letters, 10 between words

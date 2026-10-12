@@ -14,6 +14,10 @@ non-ITU symbols (! & ; _ $):
   gap layout        what morse.ps1 prints: 1 space between the symbols of
                     a letter, 3 between letters, 10 between words
 
+Prosigns (letter groups keyed as one continuous character: ...---... SOS,
+...-.- SK, -.-.- KA, ...-. VE, ........ HH; and AR BT AS KN with --prosigns)
+are recognized on decode; --encode --prosigns emits them as a single group.
+
 Examples:
     python morse.py ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."
     python morse.py -m gap "<visual morse pasted from morse.ps1>"
@@ -67,6 +71,24 @@ for _ch, _m in CODE.items():
     if _cur is None or _char_rank(_ch) < _char_rank(_cur):
         MORSE2CHAR[_m] = _ch
 
+# ---- prosigns: letter groups keyed as ONE character (no letter gaps), ------
+# ---- written with an overline.  The default set shares no pattern with -----
+# ---- a single character; AR/BT/AS/KN share .-.-. -...- .-... -.--. with ----
+# ---- + = & (  and only win when prosigns are explicitly requested. ---------
+PROSIGNS = {
+    "...---...": "SOS",   # distress signal - "transmitted as a single signal"
+    "...-.-": "SK",       # end of work
+    "-.-.-": "KA",        # starting signal
+    "...-.": "VE",        # understood
+    "........": "HH",     # error (eight dots)
+    ".-.-.": "AR",        # end of message / over
+    "-...-": "BT",        # separator
+    ".-...": "AS",        # wait
+    "-.--.": "KN",        # go ahead, specific station only
+}
+DEFAULT_PROSIGNS = {seq: name for seq, name in PROSIGNS.items() if seq not in MORSE2CHAR}
+PROSIGN_NAMES = {name: seq for seq, name in PROSIGNS.items()}   # "SOS" -> "...---..."
+
 
 def normalize(text):
     """Map every accepted dot/dash variant to plain '.' or '-'."""
@@ -83,21 +105,30 @@ def normalize(text):
     return "".join(out)
 
 
-def parse_morse(s, intra_max, letter_max):
+def parse_morse(s, intra_max, letter_max, prosigns=False):
     """Decode a normalized string, using gap widths to tell levels apart.
 
     intra_max  - longest space run still inside one letter
     letter_max - longest space run still between two letters; longer = word
+    prosigns   - also accept the conflicting prosign patterns (AR/BT/AS/KN)
+    Returns (text, unknown_tokens, prosign_names_used).
     """
     out = []
     buf = []
     unknown = []
+    hits = []
+    table = PROSIGNS if prosigns else DEFAULT_PROSIGNS
 
     def close_letter():
         if not buf:
             return
         token = "".join(buf)
         buf.clear()
+        name = table.get(token)
+        if name is not None:
+            hits.append(name)
+            out.append(name)
+            return
         ch = MORSE2CHAR.get(token)
         if ch is None:
             unknown.append(repr(token))
@@ -131,7 +162,7 @@ def parse_morse(s, intra_max, letter_max):
             out.append("?")
             i += 1
     close_letter()
-    return "".join(out).strip(), unknown
+    return "".join(out).strip(), unknown, hits
 
 
 def preferred_mode(raw):
@@ -149,11 +180,11 @@ def preferred_mode(raw):
     return "explicit"
 
 
-def decode(raw, mode="auto", verbose=False):
+def decode(raw, mode="auto", verbose=False, prosigns=False):
     """Decode Morse text.  Returns (text, list_of_unknown_tokens)."""
     norm = normalize(raw)
-    e_text, e_unk = parse_morse(norm, intra_max=0, letter_max=2)  # explicit layout
-    g_text, g_unk = parse_morse(norm, intra_max=1, letter_max=4)  # gap layout
+    e_text, e_unk, e_hits = parse_morse(norm, intra_max=0, letter_max=2, prosigns=prosigns)
+    g_text, g_unk, g_hits = parse_morse(norm, intra_max=1, letter_max=4, prosigns=prosigns)
 
     pref = preferred_mode(raw)
     if mode == "auto":
@@ -165,15 +196,23 @@ def decode(raw, mode="auto", verbose=False):
         chosen = mode
 
     if chosen == "explicit":
-        text, unknown, alt_text, alt_unk = e_text, e_unk, g_text, g_unk
+        text, unknown, hits, alt_text, alt_unk = e_text, e_unk, e_hits, g_text, g_unk
     else:
-        text, unknown, alt_text, alt_unk = g_text, g_unk, e_text, e_unk
+        text, unknown, hits, alt_text, alt_unk = g_text, g_unk, g_hits, e_text, e_unk
 
     if verbose:
         print(f"[morse] mode={chosen} (auto preference: {pref})", file=sys.stderr)
+        if hits:
+            print("[morse] prosign(s): " + ", ".join(hits), file=sys.stderr)
         print(f"[morse] unknown counts: explicit={len(e_unk)} gap={len(g_unk)}", file=sys.stderr)
         if unknown:
             print("[morse] unknown: " + ", ".join(unknown), file=sys.stderr)
+        if not prosigns:
+            tokens = set(norm.split())
+            for seq, name in PROSIGNS.items():
+                if seq in MORSE2CHAR and seq in tokens:
+                    print(f"[morse] note: {seq} is also prosign {name} "
+                          f"(use --prosigns to prefer the prosign)", file=sys.stderr)
         if alt_text.strip() and alt_text.strip() != text:
             marker = "" if alt_unk else "   (that reading has no errors)"
             other = "gap" if chosen == "explicit" else "explicit"
@@ -181,11 +220,45 @@ def decode(raw, mode="auto", verbose=False):
     return text, unknown
 
 
-def encode_visual(text):
-    """Encode to exactly what morse.ps1 prints (1/3/10-space gaps)."""
+_PROSIGN_RE = None
+
+
+def _prosign_words():
+    """Regex matching prosign names as whole words (longest name first)."""
+    global _PROSIGN_RE
+    if _PROSIGN_RE is None:
+        names = sorted(PROSIGNS.values(), key=len, reverse=True)
+        _PROSIGN_RE = re.compile(r"(?<![A-Z0-9])(" + "|".join(names) + r")(?![A-Z0-9])")
+    return _PROSIGN_RE
+
+
+def _encode_units(text, prosigns):
+    """Split text into units: ('prosign', NAME) or ('char', ch)."""
+    text = text.upper()
+    if not prosigns:
+        for ch in text:
+            yield "char", ch
+        return
+    pattern = _prosign_words()
+    pos = 0
+    for match in pattern.finditer(text):
+        for ch in text[pos:match.start()]:
+            yield "char", ch
+        yield "prosign", match.group(1)
+        pos = match.end()
+    for ch in text[pos:]:
+        yield "char", ch
+
+
+def encode_visual(text, prosigns=False):
+    """Encode to exactly what morse.ps1 prints (1/3/10-space gaps).
+
+    With prosigns=True, matched prosign names are emitted as a single
+    gapless character group (the formal single-signal form).
+    """
     parts = []
-    for ch in text.upper():
-        morse = CODE.get(ch)
+    for kind, value in _encode_units(text, prosigns):
+        morse = PROSIGN_NAMES[value] if kind == "prosign" else CODE.get(value)
         if morse is None:
             parts.append(" " * 7)          # like morse.ps1: word gap for spaces/unknown
         else:
@@ -193,11 +266,16 @@ def encode_visual(text):
     return "".join(parts)
 
 
-def encode_plain(text):
+def encode_plain(text, prosigns=False):
     """Encode to the classic written form: ".... . .-.. .-.. --- / ..."."""
     words = []
     for word in text.upper().split():
-        tokens = [CODE[c] for c in word if c in CODE]
+        tokens = []
+        for kind, value in _encode_units(word, prosigns):
+            if kind == "prosign":
+                tokens.append(PROSIGN_NAMES[value])
+            elif value in CODE:
+                tokens.append(CODE[value])
         words.append(" ".join(tokens))
     return " / ".join(w for w in words if w)
 
@@ -242,8 +320,30 @@ def self_test():
           decode(encode_visual(challenge.replace(" ", "")))[0],
           challenge.replace(" ", ""))
 
-    # 5. error handling
-    text, unknown = decode("........")
+    # 5. prosigns - letter groups keyed as one continuous character
+    check("prosign sos", decode("...---...")[0], "SOS")
+    check("prosign sk", decode("...-.-")[0], "SK")
+    check("prosign ka", decode("-.-.-")[0], "KA")
+    check("prosign ve", decode("...-.")[0], "VE")
+    check("prosign error hh", decode("........")[0], "HH")
+    check("prosign conflict stays +", decode(".-.-.")[0], "+")
+    check("prosign ar with flag", decode(".-.-.", prosigns=True)[0], "AR")
+    check("prosign bt with flag", decode("-...-", prosigns=True)[0], "BT")
+    check("prosign as with flag", decode(".-...", prosigns=True)[0], "AS")
+    check("prosign kn with flag", decode("-.--.", prosigns=True)[0], "KN")
+    check("prosign encode gapless plain", encode_plain("SOS", prosigns=True), "...---...")
+    check("prosign encode gapless visual",
+          encode_visual("SOS", prosigns=True).rstrip(),
+          "\u25cf \u25cf \u25cf \u2015 \u2015 \u2015 \u25cf \u25cf \u25cf")
+    check("prosign encode default spaced", encode_plain("SOS"), "... --- ...")
+    check("prosign roundtrip decode", decode(encode_plain("SOS", prosigns=True))[0], "SOS")
+    check("prosign ar roundtrip",
+          decode(encode_plain("AR", prosigns=True), prosigns=True)[0], "AR")
+    check("prosign word boundary",
+          decode(encode_plain("SOSSOS", prosigns=True))[0], "SOSSOS")
+
+    # 6. error handling
+    text, unknown = decode("......")
     check("unknown -> ?", text, "?")
     check("unknown counted", len(unknown) >= 1, True)
     text, unknown = decode(".- x -...")
@@ -271,6 +371,37 @@ def read_input(args):
         return ""
 
 
+_MORSE_ARG_CHARS = set(".-/ \t")
+
+
+def _looks_like_morse(tok: str) -> bool:
+    return (tok.startswith("-") and tok not in ("-", "--")
+            and all(ch in _MORSE_ARG_CHARS for ch in tok))
+
+
+def _protect_dashed_morse(argv: list[str]) -> list[str]:
+    """Let morse strings that start with '-' (e.g. '-.-.-') survive argparse.
+
+    argparse would treat '-.-.-' as an option.  First merge '-e'/--encode
+    values that look like morse into the '--encode=...' form, then insert a
+    single '--' before the first positional that starts with a dash.
+    """
+    merged: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-e", "--encode") and i + 1 < len(argv) and _looks_like_morse(argv[i + 1]):
+            merged.append("--encode=" + argv[i + 1])
+            i += 2
+            continue
+        merged.append(tok)
+        i += 1
+    for j, tok in enumerate(merged):
+        if _looks_like_morse(tok):
+            return merged[:j] + ["--"] + merged[j:]
+    return merged
+
+
 def main(argv=None):
     # Make console/file redirection survive non-UTF-8 defaults.  reconfigure()
     # only exists on real TextIOWrapper streams (not on None, or on replacers
@@ -295,13 +426,18 @@ def main(argv=None):
                         help="encode TEXT to morse instead of decoding (- reads stdin)")
     parser.add_argument("--style", choices=("visual", "plain"), default="visual",
                         help="output style for --encode (default: visual)")
+    parser.add_argument("--prosigns", action="store_true",
+                        help="recognize prosign groups (SOS, SK, KA, VE, HH, and with the "
+                             "flag AR/BT/AS/KN over their punctuation pattern); with --encode, "
+                             "emit matched names as one gapless group")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="explain how the input was interpreted")
     parser.add_argument("--strict", action="store_true",
                         help="exit with code 2 when unknown morse sequences are found")
     parser.add_argument("--self-test", action="store_true",
                         help="run built-in round-trip tests")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(
+        _protect_dashed_morse(argv if argv is not None else sys.argv[1:]))
 
     if args.self_test:
         return self_test()
@@ -310,8 +446,8 @@ def main(argv=None):
         text = args.encode
         if text == "-":                     # read from stdin (PowerShell 5.1 pipes)
             text = sys.stdin.read().rstrip("\r\n")
-        print(encode_visual(text) if args.style == "visual"
-              else encode_plain(text))
+        print(encode_visual(text, args.prosigns) if args.style == "visual"
+              else encode_plain(text, args.prosigns))
         return 0
 
     raw = read_input(args)
@@ -319,7 +455,7 @@ def main(argv=None):
         print("nothing to decode", file=sys.stderr)
         return 0
 
-    text, unknown = decode(raw, args.mode, args.verbose)
+    text, unknown = decode(raw, args.mode, args.verbose, args.prosigns)
 
     if args.strict and unknown:
         print(f"morse: {len(unknown)} unknown sequence(s): {', '.join(unknown)}",

@@ -33,6 +33,13 @@
     Print how the input was interpreted, and the alternative reading when
     the two layouts disagree.
 
+.PARAMETER Prosigns
+    Decode prosign groups (letter groups keyed as one continuous character).
+    ...---... decodes to SOS, ...-.- to SK, -.-.- to KA, ...-. to VE and
+    ........ to HH.  With -Prosigns the conflicting groups win over the
+    punctuation they share a pattern with: .-.-. AR (not +), -...- BT
+    (not =), .-... AS (not &), -.--. KN (not ().
+
 .EXAMPLE
     .\morse_decode.ps1 -Morse ".... . .-.. .-.. --- / .-- --- .-. .-.. -.."
     HELLO WORLD
@@ -49,7 +56,9 @@ param(
 
     [string]$FromFile = "",
 
-    [switch]$Detail
+    [switch]$Detail,
+
+    [switch]$Prosigns
 )
 
 Set-StrictMode -Version Latest
@@ -98,6 +107,27 @@ foreach ($entry in $CodeTable.GetEnumerator()) {
     }
 }
 
+# prosigns: letter groups keyed as ONE character (no letter gaps).  The
+# default set shares no pattern with a single character; AR/BT/AS/KN share
+# their pattern with + = & ( and only win when -Prosigns is given.
+$AllProsigns = @{
+    '...---...' = 'SOS'    # distress signal - transmitted as a single signal
+    '...-.-'    = 'SK'     # end of work
+    '-.-.-'     = 'KA'     # starting signal
+    '...-.'     = 'VE'     # understood
+    '........'  = 'HH'     # error (eight dots)
+    '.-.-.'     = 'AR'     # end of message / over
+    '-...-'     = 'BT'     # separator
+    '.-...'     = 'AS'     # wait
+    '-.--.'     = 'KN'     # go ahead, specific station only
+}
+$DefaultProsigns = @{}
+foreach ($entry in $AllProsigns.GetEnumerator()) {
+    if (-not $Reverse.ContainsKey([string]$entry.Key)) {
+        $DefaultProsigns[[string]$entry.Key] = [string]$entry.Value
+    }
+}
+
 # symbol sets the decoder accepts
 $script:DotChars    = @(0x2E, 0xB7, 0x2022, 0x2024, 0x2219, 0x25CF, 0x25E6, 0xFF0E) | ForEach-Object { [char]$_ }
 $script:DashChars   = @(0x2D, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0x2500, 0xFF0D) | ForEach-Object { [char]$_ }   # no 0x5F: "_" is a real character (..--.-), not a dash
@@ -121,12 +151,20 @@ function Close-LetterGroup {
     param(
         [System.Text.StringBuilder]$Buffer,
         [System.Text.StringBuilder]$Out,
-        [System.Collections.Generic.List[string]]$Unknown
+        [System.Collections.Generic.List[string]]$Unknown,
+        [System.Collections.Generic.List[string]]$Notes,
+        [bool]$ProsignMode
     )
     if ($Buffer.Length -eq 0) { return }
     $sequence = $Buffer.ToString()
     [void]$Buffer.Clear()
-    if ($Reverse.ContainsKey($sequence)) {
+    $table = $script:DefaultProsigns
+    if ($ProsignMode) { $table = $script:AllProsigns }
+    if ($table.ContainsKey($sequence)) {
+        [void]$Out.Append([string]$table[$sequence])
+        $Notes.Add([string]$table[$sequence])
+    }
+    elseif ($Reverse.ContainsKey($sequence)) {
         [void]$Out.Append($Reverse[$sequence])
     }
     else {
@@ -139,11 +177,12 @@ function Close-LetterGroup {
 #   IntraMax  - longest space run still inside one letter
 #   LetterMax - longest space run still between two letters; longer = word
 function Invoke-MorseParse {
-    param([string]$Text, [int]$IntraMax, [int]$LetterMax)
+    param([string]$Text, [int]$IntraMax, [int]$LetterMax, [bool]$ProsignMode)
 
     $out     = New-Object System.Text.StringBuilder
     $buffer  = New-Object System.Text.StringBuilder
     $unknown = New-Object 'System.Collections.Generic.List[string]'
+    $notes   = New-Object 'System.Collections.Generic.List[string]'
 
     $i = 0
     while ($i -lt $Text.Length) {
@@ -153,13 +192,13 @@ function Invoke-MorseParse {
             while ($j -lt $Text.Length -and [char]::IsWhiteSpace($Text[$j])) { $j++ }
             $run = $j - $i
             if ($buffer.Length -gt 0 -and $run -gt $IntraMax) {
-                Close-LetterGroup $buffer $out $unknown
+                Close-LetterGroup $buffer $out $unknown $notes $ProsignMode
                 if ($run -gt $LetterMax) { [void]$out.Append(' ') }
             }
             $i = $j
         }
         elseif ($c -eq '/') {
-            Close-LetterGroup $buffer $out $unknown
+            Close-LetterGroup $buffer $out $unknown $notes $ProsignMode
             [void]$out.Append(' ')
             $i++
         }
@@ -174,10 +213,10 @@ function Invoke-MorseParse {
             $i++
         }
     }
-    Close-LetterGroup $buffer $out $unknown
+    Close-LetterGroup $buffer $out $unknown $notes $ProsignMode
 
     $text = ($out.ToString() -replace '\s+', ' ').Trim()
-    return @{ Text = $text; Unknown = $unknown }
+    return @{ Text = $text; Unknown = $unknown; Notes = $notes }
 }
 
 # Guess which layout the user pasted.
@@ -220,7 +259,7 @@ try {
     if ($FromFile) {
         $raw = Get-Content -LiteralPath $FromFile -Raw -Encoding UTF8
     }
-    if (-not $raw) {
+    elseif (-not $raw) {
         if ([Console]::IsInputRedirected) { $raw = Read-AllStdin }
         else { $raw = Read-Host 'Enter morse code to read' }
     }
@@ -230,8 +269,8 @@ try {
     }
 
     $normalized = ConvertTo-MorseSymbols $raw
-    $explicit   = Invoke-MorseParse $normalized 0 2   # one space between letters
-    $gap        = Invoke-MorseParse $normalized 1 4   # morse.ps1 timing gaps
+    $explicit   = Invoke-MorseParse $normalized 0 2 ([bool]$Prosigns)   # one space between letters
+    $gap        = Invoke-MorseParse $normalized 1 4 ([bool]$Prosigns)   # morse.ps1 timing gaps
     $preferred  = Get-PreferredLayout $raw
 
     if ($Mode -ne 'auto') {
@@ -259,6 +298,18 @@ try {
         Write-Host ("unknown : {0}   (explicit layout: {1}, gap layout: {2})" -f $result.Unknown.Count, $explicit.Unknown.Count, $gap.Unknown.Count)
         if ($result.Unknown.Count -gt 0) {
             Write-Host ("          " + ($result.Unknown -join '  '))
+        }
+        if ($result.Notes.Count -gt 0) {
+            Write-Host ("prosign : " + ($result.Notes -join '  '))
+        }
+        if (-not $Prosigns) {
+            $tokens = @($normalized -split '\s+')
+            foreach ($entry in $AllProsigns.GetEnumerator()) {
+                $seq = [string]$entry.Key
+                if ($Reverse.ContainsKey($seq) -and ($tokens -contains $seq)) {
+                    Write-Host ("note    : {0} is also the prosign {1} (use -Prosigns)" -f $seq, $entry.Value)
+                }
+            }
         }
         if ($other.Text -and $other.Text -ne $result.Text) {
             Write-Host ("also reads as ({0} layout): {1}" -f $otherName, $other.Text)
